@@ -67,41 +67,28 @@ class AssignmentRecord:
     def GetWinRate(self):
         return self.WinCount / self.TotalCount if self.TotalCount > 0 else 0
 
-# ==================== 2. 用 Pandas 純手寫還原技術指標 ====================
-def compute_sma(series, period):
-    return series.rolling(window=max(1, int(period))).mean().values
+# ==================== 2. AI 評分核心函數 (同步給最佳化與最終顯示使用) ====================
+def calculate_ai_score(res):
+    win_rate = res.GetWinRate()
+    net_profit = res.TotalProfit
+    mdd = res.MDD
 
-def compute_rsi(series, period):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=max(1, int(period))).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=max(1, int(period))).mean()
-    rs = gain / (loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+    score = 50
+    if net_profit > 500000: score += 20
+    elif net_profit > 100000: score += 10
+    elif net_profit < 0: score -= 20
 
-def compute_bbands(series, period, nbdev):
-    ma = series.rolling(window=max(1, int(period))).mean()
-    std = series.rolling(window=max(1, int(period))).std()
-    upper = ma + (nbdev * std)
-    lower = ma - (nbdev * std)
-    return upper.values, ma.values, lower.values
+    if win_rate > 0.55: score += 15
+    elif win_rate > 0.45: score += 5
+    else: score -= 10
 
-def compute_macd(series, fast, slow, signal):
-    exp1 = series.ewm(span=max(1, int(fast)), adjust=False).mean()
-    exp2 = series.ewm(span=max(1, int(slow)), adjust=False).mean()
-    macd_line = exp1 - exp2
-    signal_line = macd_line.ewm(span=max(1, int(signal)), adjust=False).mean()
-    hist = macd_line - signal_line
-    return hist.values
-
-def compute_kdj(df, period=9, m1=3, m2=3):
-    low_min = df['low'].rolling(window=max(1, int(period))).min()
-    high_max = df['high'].rolling(window=max(1, int(period))).max()
-    rsv = (df['close'] - low_min) / (high_max - low_min + 1e-10) * 100
-    k = rsv.ewm(com=max(0.1, m1-1), adjust=False).mean()
-    d = k.ewm(com=max(0.1, m2-1), adjust=False).mean()
-    j = 3 * k - 2 * d
-    return k.values, d.values, j.values
+    if mdd > 0:
+        pr_ratio = net_profit / mdd
+        if pr_ratio > 2.5: score += 15
+        elif pr_ratio > 1.0: score += 5
+        else: score -= 10
+    
+    return max(min(score, 100), 10)
 
 # ==================== 3. 雲端自動碎片拼接與資料庫讀取 ====================
 @st.cache_data
@@ -122,16 +109,11 @@ def load_and_process_data():
             status = f"碎片拼裝出錯: {str(e)}"
     elif os.path.exists(target_db):
         status = "雲端 300MB 真實大檔案 (使用已存在的完全體)"
-    elif os.path.exists(r"C:\Users\Minir\OneDrive\桌面\量化交易期末報告\shioaji.db"):
-        db_path = r"C:\Users\Minir\OneDrive\桌面\量化交易期末報告\shioaji.db"
-        status = "本地 300MB 真實台積電完整歷史資料庫"
     else:
         status = "系統模擬展示數據"
 
     if os.path.exists(target_db):
         db_path = target_db
-    elif os.path.exists(r"C:\Users\Minir\OneDrive\桌面\量化交易期末報告\shioaji.db"):
-        db_path = r"C:\Users\Minir\OneDrive\桌面\量化交易期末報告\shioaji.db"
     else:
         dates = pd.date_range(start="2021-01-01", end="2026-01-01", freq="h")
         np.random.seed(42)
@@ -171,63 +153,94 @@ def load_and_process_data():
         df_mock.index.name = 'time'
         return df_mock.reset_index(), "資料庫讀取異常 ➔ 啟動應急安全數據庫"
 
+# ==================== 用 Pandas 純手寫還原技術指標 ====================
+def compute_sma(series, period):
+    return series.rolling(window=max(1, int(period))).mean().values
+
+def compute_rsi(series, period):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=max(1, int(period))).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=max(1, int(period))).mean()
+    rs = gain / (loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+def compute_bbands(series, period, nbdev):
+    ma = series.rolling(window=max(1, int(period))).mean()
+    std = series.rolling(window=max(1, int(period))).std()
+    upper = ma + (nbdev * std)
+    lower = ma - (nbdev * std)
+    return upper.values, ma.values, lower.values
+
+def compute_macd(series, fast, slow, signal):
+    exp1 = series.ewm(span=max(1, int(fast)), adjust=False).mean()
+    exp2 = series.ewm(span=max(1, int(slow)), adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=max(1, int(signal)), adjust=False).mean()
+    hist = macd_line - signal_line
+    return hist.values
+
+def compute_kdj(df, period=9, m1=3, m2=3):
+    low_min = df['low'].rolling(window=max(1, int(period))).min()
+    high_max = df['high'].rolling(window=max(1, int(period))).max()
+    rsv = (df['close'] - low_min) / (high_max - low_min + 1e-10) * 100
+    k = rsv.ewm(com=max(0.1, m1-1), adjust=False).mean()
+    d = k.ewm(com=max(0.1, m2-1), adjust=False).mean()
+    j = 3 * k - 2 * d
+    return k.values, d.values, j.values
+
 df_hourly, db_status = load_and_process_data()
 st.caption(f"💡 當前資料來源：{db_status} (總歷史數據: {len(df_hourly):,} 根 K 線)")
 
-# ==================== 4. 側邊欄控制面板 ====================
+# ==================== 4. 側邊欄與滑桿專屬記憶體 (徹底解決死鎖) ====================
 st.sidebar.header("⚙️ 策略與參數控制面板")
 strategy_choice = st.sidebar.selectbox(
     "選擇交易策略",
     ["(一) 移動平均策略 (MA)", "(二) RSI 順勢策略", "(三) RSI 逆勢策略", "(四) 布林通道策略 (BBands)", "(五) MACD 趨勢策略", "(六) KDJ 震盪策略"]
 )
 
-if "strat_params" not in st.session_state:
-    st.session_state.strat_params = {
-        "(一) 移動平均策略 (MA)": {"p1": 20, "p2": 5, "p3": 0, "sl": 10},
-        "(二) RSI 順勢策略": {"p1": 14, "p2": 50, "p3": 0, "sl": 20},
-        "(三) RSI 逆勢策略": {"p1": 14, "p2": 30, "p3": 70, "sl": 15},
-        "(四) 布林通道策略 (BBands)": {"p1": 20, "p2": 2, "p3": 0, "sl": 25},
-        "(五) MACD 趨勢策略": {"p1": 12, "p2": 26, "p3": 9, "sl": 30},
-        "(六) KDJ 震盪策略": {"p1": 9, "p2": 3, "p3": 3, "sl": 25}
-    }
-
-current_params = st.session_state.strat_params[strategy_choice]
+default_keys = {
+    "ma_p1": 20, "ma_p2": 5, "ma_sl": 10,
+    "rsi_s_p1": 14, "rsi_s_p2": 50, "rsi_s_sl": 20,
+    "rsi_r_p1": 14, "rsi_r_p2": 30, "rsi_r_p3": 70, "rsi_r_sl": 15,
+    "bb_p1": 20, "bb_p2": 2, "bb_sl": 25,
+    "macd_p1": 12, "macd_p2": 26, "macd_p3": 9, "macd_sl": 30,
+    "kdj_p1": 9, "kdj_p2": 3, "kdj_p3": 3, "kdj_sl": 25
+}
+for k, v in default_keys.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 if strategy_choice == "(一) 移動平均策略 (MA)":
-    p1 = st.sidebar.slider("長天期均線 (Long MA)", 20, 60, int(current_params["p1"]), key="ma_p1")
-    p2 = st.sidebar.slider("短天期均線 (Short MA)", 5, 19, int(current_params["p2"]), key="ma_p2")
+    p1 = st.sidebar.slider("長天期均線 (Long MA)", 20, 60, key="ma_p1")
+    p2 = st.sidebar.slider("短天期均線 (Short MA)", 5, 19, key="ma_p2")
     p3 = 0
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="ma_sl")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="ma_sl")
 elif strategy_choice == "(二) RSI 順勢策略":
-    p1 = st.sidebar.slider("RSI 週期", 5, 30, int(current_params["p1"]), key="rsi_s_p1")
-    p2 = st.sidebar.slider("順勢買入超買界線", 50, 80, int(current_params["p2"]), key="rsi_s_p2")
+    p1 = st.sidebar.slider("RSI 週期", 5, 30, key="rsi_s_p1")
+    p2 = st.sidebar.slider("順勢買入超買界線", 50, 80, key="rsi_s_p2")
     p3 = 0
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="rsi_s_sl")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="rsi_s_sl")
 elif strategy_choice == "(三) RSI 逆勢策略":
-    p1 = st.sidebar.slider("RSI 週期", 5, 30, int(current_params["p1"]), key="rsi_r_p1")
-    p2 = st.sidebar.slider("逆勢買入低估界線", 10, 45, int(current_params["p2"]), key="rsi_r_p2")
-    p3 = st.sidebar.slider("逆勢賣出高估界線", 55, 90, int(current_params["p3"]), key="rsi_r_p3")
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="rsi_r_sl")
+    p1 = st.sidebar.slider("RSI 週期", 5, 30, key="rsi_r_p1")
+    p2 = st.sidebar.slider("逆勢買入低估界線", 10, 45, key="rsi_r_p2")
+    p3 = st.sidebar.slider("逆勢賣出高估界線", 55, 90, key="rsi_r_p3")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="rsi_r_sl")
 elif strategy_choice == "(四) 布林通道策略 (BBands)":
-    p1 = st.sidebar.slider("中線週期 (MA period)", 5, 40, int(current_params["p1"]), key="bb_p1")
-    p2 = st.sidebar.slider("標準差倍數 (Std Dev)", 1, 3, int(current_params["p2"]), key="bb_p2")
+    p1 = st.sidebar.slider("中線週期 (MA period)", 5, 40, key="bb_p1")
+    p2 = st.sidebar.slider("標準差倍數 (Std Dev)", 1, 3, key="bb_p2")
     p3 = 0
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="bb_sl")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="bb_sl")
 elif strategy_choice == "(五) MACD 趨勢策略":
-    p1 = st.sidebar.slider("MACD 快線週期", 5, 20, int(current_params["p1"]), key="macd_p1")
-    p2 = st.sidebar.slider("MACD 慢線週期", 21, 40, int(current_params["p2"]), key="macd_p2")
-    p3 = st.sidebar.slider("訊號線週期", 5, 15, int(current_params["p3"]), key="macd_p3")
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="macd_sl")
+    p1 = st.sidebar.slider("MACD 快線週期", 5, 20, key="macd_p1")
+    p2 = st.sidebar.slider("MACD 慢線週期", 21, 40, key="macd_p2")
+    p3 = st.sidebar.slider("訊號線週期", 5, 15, key="macd_p3")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="macd_sl")
 elif strategy_choice == "(六) KDJ 震盪策略":
-    p1 = st.sidebar.slider("KDJ 快線週期 (FastK)", 5, 25, int(current_params["p1"]), key="kdj_p1")
-    p2 = st.sidebar.slider("SlowK 磨平週期", 2, 10, int(current_params["p2"]), key="kdj_p2")
-    p3 = st.sidebar.slider("SlowD 磨平週期", 2, 10, int(current_params["p3"]), key="kdj_p3")
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="kdj_sl")
-
-st.session_state.strat_params[strategy_choice]["p1"] = p1
-st.session_state.strat_params[strategy_choice]["p2"] = p2
-st.session_state.strat_params[strategy_choice]["p3"] = p3
-st.session_state.strat_params[strategy_choice]["sl"] = stop_loss
+    p1 = st.sidebar.slider("KDJ 快線週期 (FastK)", 5, 25, key="kdj_p1")
+    p2 = st.sidebar.slider("SlowK 磨平週期", 2, 10, key="kdj_p2")
+    p3 = st.sidebar.slider("SlowD 磨平週期", 2, 10, key="kdj_p3")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="kdj_sl")
 
 # ==================== 5. 核心回測實作 ====================
 def run_backtest(df, strategy, param1, param2, param3, sl_points):
@@ -309,8 +322,7 @@ def run_backtest(df, strategy, param1, param2, param3, sl_points):
                     rec.Cover('Sell', open_p[n+1], n)
                 elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
             elif rec.OpenInterestQty < 0:
-                if_close = close[n] < lower[n] or close[n] > stop_loss_line
-                if if_close:
+                if close[n] < lower[n] or close[n] > stop_loss_line:
                     rec.Cover('Buy', open_p[n+1], n)
                 elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
 
@@ -360,80 +372,98 @@ def run_backtest(df, strategy, param1, param2, param3, sl_points):
     rec.FillRemainingEquity()
     return rec
 
-# ==================== 6. 黃金參數最佳化計算觸發 ====================
+# ==================== 6. 黃金參數最佳化 (鎖定 AI 最高分) ====================
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 機器極速參數最佳化")
 
 if st.sidebar.button("🚀 啟動黃金參數最佳化"):
-    with st.spinner("🤖 AI 正在進行全參數地毯式精細搜尋..."):
-        st.cache_data.clear()
+    with st.spinner("🤖 正在狩獵高勝率、高利潤的神級黃金參數..."):
+        best_score = -1
         best_profit = -999999999
         best_p1, best_p2, best_p3, best_sl = p1, p2, p3, stop_loss
         
-        # 💡 將步長(step)全部改為 1，展開精細地毯式回測，保證絕對能抓到最高分的那組參數！
+        # 💡 以 AI 評分最高為目標，如果同分才比淨利，杜絕瞎貓碰到死耗子的爛參數！
         if "(一)" in strategy_choice:
-            for test_p1 in range(20, 61, 4):
+            for test_p1 in range(20, 61, 2):
                 for test_p2 in range(5, 20, 2):
                     for test_sl in range(5, 46, 5):
                         res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 0, test_sl)
-                        if res.TotalProfit > best_profit:
-                            best_profit = res.TotalProfit
+                        cur_score = calculate_ai_score(res)
+                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                            best_score, best_profit = cur_score, res.TotalProfit
                             best_p1, best_p2, best_sl = test_p1, test_p2, test_sl
-            best_p3 = 0
+            
+            # 強制覆寫滑桿記憶體，解開死鎖！
+            st.session_state["ma_p1"] = best_p1
+            st.session_state["ma_p2"] = best_p2
+            st.session_state["ma_sl"] = best_sl
             
         elif "(二)" in strategy_choice:
-            for test_p1 in range(5, 31, 3):
-                for test_p2 in range(50, 81, 4):
+            for test_p1 in range(5, 31, 2):
+                for test_p2 in range(50, 81, 2):
                     for test_sl in range(5, 46, 5):
                         res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 0, test_sl)
-                        if res.TotalProfit > best_profit:
-                            best_profit = res.TotalProfit
+                        cur_score = calculate_ai_score(res)
+                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                            best_score, best_profit = cur_score, res.TotalProfit
                             best_p1, best_p2, best_sl = test_p1, test_p2, test_sl
-            best_p3 = 0
+            st.session_state["rsi_s_p1"] = best_p1
+            st.session_state["rsi_s_p2"] = best_p2
+            st.session_state["rsi_s_sl"] = best_sl
 
         elif "(三)" in strategy_choice:
-            for test_p1 in range(5, 26, 5):
+            for test_p1 in range(5, 26, 2):
                 for test_p2 in range(15, 41, 5):
-                    for test_p3 in range(65, 86, 5):
+                    for test_p3 in range(60, 91, 5):
                         for test_sl in range(10, 36, 5):
                             res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, test_p3, test_sl)
-                            if res.TotalProfit > best_profit:
-                                best_profit = res.TotalProfit
+                            cur_score = calculate_ai_score(res)
+                            if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                                best_score, best_profit = cur_score, res.TotalProfit
                                 best_p1, best_p2, best_p3, best_sl = test_p1, test_p2, test_p3, test_sl
+            st.session_state["rsi_r_p1"] = best_p1
+            st.session_state["rsi_r_p2"] = best_p2
+            st.session_state["rsi_r_p3"] = best_p3
+            st.session_state["rsi_r_sl"] = best_sl
 
         elif "(四)" in strategy_choice:
-            for test_p1 in range(5, 41, 4):
+            for test_p1 in range(5, 41, 2):
                 for test_p2 in [1, 2, 3]:
                     for test_sl in range(5, 46, 5):
                         res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 0, test_sl)
-                        if res.TotalProfit > best_profit:
-                            best_profit = res.TotalProfit
+                        cur_score = calculate_ai_score(res)
+                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                            best_score, best_profit = cur_score, res.TotalProfit
                             best_p1, best_p2, best_sl = test_p1, test_p2, test_sl
-            best_p3 = 0
+            st.session_state["bb_p1"] = best_p1
+            st.session_state["bb_p2"] = best_p2
+            st.session_state["bb_sl"] = best_sl
 
         elif "(五)" in strategy_choice:
-            for test_p1 in range(6, 19, 3):
-                for test_p2 in range(21, 38, 4):
+            for test_p1 in range(6, 19, 2):
+                for test_p2 in range(21, 38, 2):
                     for test_sl in range(10, 46, 5):
                         res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 9, test_sl)
-                        if res.TotalProfit > best_profit:
-                            best_profit = res.TotalProfit
+                        cur_score = calculate_ai_score(res)
+                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                            best_score, best_profit = cur_score, res.TotalProfit
                             best_p1, best_p2, best_sl = test_p1, test_p2, test_sl
-            best_p3 = 9
+            st.session_state["macd_p1"] = best_p1
+            st.session_state["macd_p2"] = best_p2
+            st.session_state["macd_sl"] = best_sl
 
         elif "(六)" in strategy_choice:
-            for test_p1 in range(5, 26, 4):
+            for test_p1 in range(5, 26, 2):
                 for test_sl in range(10, 46, 5):
                     res = run_backtest(df_hourly, strategy_choice, test_p1, 3, 3, test_sl)
-                    if res.TotalProfit > best_profit:
-                        best_profit = res.TotalProfit
+                    cur_score = calculate_ai_score(res)
+                    if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                        best_score, best_profit = cur_score, res.TotalProfit
                         best_p1, best_sl = test_p1, test_sl
-            best_p2, best_p3 = 3, 3
+            st.session_state["kdj_p1"] = best_p1
+            st.session_state["kdj_sl"] = best_sl
 
-        st.session_state.strat_params[strategy_choice] = {
-            "p1": best_p1, "p2": best_p2, "p3": best_p3, "sl": best_sl
-        }
-        st.sidebar.success("✨ 最佳化完成！")
+        st.sidebar.success(f"✨ 找到最高 AI 評分策略組合 ({best_score} 分)！")
         st.rerun()
 
 current_res = run_backtest(df_hourly, strategy_choice, p1, p2, p3, stop_loss)
@@ -458,38 +488,20 @@ st.pyplot(fig)
 st.markdown("---")
 st.subheader("🤖 AI 量化交易策略體質綜合評估與比較")
 
-win_rate = current_res.GetWinRate()
-net_profit = current_res.TotalProfit
-mdd = current_res.MDD
-
-score = 50
-if net_profit > 500000: score += 20
-elif net_profit > 100000: score += 10
-elif net_profit < 0: score -= 20
-
-if win_rate > 0.55: score += 15
-elif win_rate > 0.45: score += 5
-else: score -= 10
-
-if mdd > 0:
-    pr_ratio = net_profit / mdd
-    if pr_ratio > 2.5: score += 15
-    elif pr_ratio > 1.0: score += 5
-    else: score -= 10
-score = max(min(score, 100), 10)
+score = calculate_ai_score(current_res)
 
 if score >= 80:
     rating = "🌟 優秀 (Tier A)"
     color = "green"
-    advice = "該策略在台積電歷史趨勢中獲利表現良好。"
+    advice = "該策略在歷史回測中完美通過 AI 評估，具備高勝率與優良風險報酬比！"
 elif score >= 60:
     rating = "⚖️ 良好 (Tier B)"
     color = "blue"
-    advice = "策略具備獲利能力，參數在合理範圍。"
+    advice = "策略具備穩定獲利能力，風險控制在合理範圍內。"
 else:
     rating = "⚠️ 待優化 (Tier C)"
     color = "red"
-    advice = "當前參數組合表現不理想。請嘗試按下『黃金參數最佳化』按鈕讓機器為您尋找最佳利潤與滑桿定位，或手動微調控制面板。"
+    advice = "當前參數組合表現不理想。請嘗試按下側邊欄的『🚀 啟動黃金參數最佳化』按鈕讓機器為您尋找最佳解答。"
 
 ai_col1, ai_col2 = st.columns([1, 3])
 with ai_col1:
