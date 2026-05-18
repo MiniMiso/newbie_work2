@@ -13,7 +13,7 @@ plt.rcParams['axes.unicode_minus'] = False
 st.set_page_config(page_title="台積電2330多功能交易回測系統", layout="wide")
 st.title("📊 台積電 2330 - 完整量化交易回測、參數最佳化與 AI 評估系統")
 
-# ==================== 1. 核心回測引擎 ====================
+# ==================== 1. 基礎建設 (回測記錄與指標函數) ====================
 class AssignmentRecord:
     def __init__(self, total_bars):
         self.OpenInterestQty = 0
@@ -37,113 +37,219 @@ class AssignmentRecord:
                 profit = (OrderPrice - self.OrderPrice) * self.OpenInterestQty * 1000
             elif self.OpenInterestQty < 0 and (BS == 'B' or BS == 'Buy'):
                 profit = (self.OrderPrice - OrderPrice) * (-self.OpenInterestQty) * 1000
-            else:
-                return
+            else: return
             
             self.Profit.append(profit)
             self.TotalProfit += profit
             self.TotalCount += 1
-            if profit > 0:
-                self.WinCount += 1
-                
+            if profit > 0: self.WinCount += 1
             self.EquityHistory[current_idx] = self.TotalProfit
-            
-            if self.TotalProfit > self.MaxEquity:
-                self.MaxEquity = self.TotalProfit
+            if self.TotalProfit > self.MaxEquity: self.MaxEquity = self.TotalProfit
             mdd = self.MaxEquity - self.TotalProfit
-            if mdd > self.MDD:
-                self.MDD = mdd
-                
+            if mdd > self.MDD: self.MDD = mdd
             self.OpenInterestQty = 0
 
     def FillRemainingEquity(self):
         current_balance = 0
         for i in range(len(self.EquityHistory)):
-            if self.EquityHistory[i] == 0 and i > 0:
-                self.EquityHistory[i] = current_balance
-            elif self.EquityHistory[i] != 0:
-                current_balance = self.EquityHistory[i]
+            if self.EquityHistory[i] == 0 and i > 0: self.EquityHistory[i] = current_balance
+            elif self.EquityHistory[i] != 0: current_balance = self.EquityHistory[i]
 
     def GetWinRate(self):
         return self.WinCount / self.TotalCount if self.TotalCount > 0 else 0
 
-# ==================== 2. AI 評分核心函數 (同步給最佳化與最終顯示使用) ====================
+def compute_sma(series, period): return series.rolling(window=max(1, int(period))).mean().values
+def compute_rsi(series, period):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=max(1, int(period))).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=max(1, int(period))).mean()
+    rs = gain / (loss + 1e-10)
+    return (100 - (100 / (1 + rs))).values
+def compute_bbands(series, period, nbdev):
+    ma = series.rolling(window=max(1, int(period))).mean()
+    std = series.rolling(window=max(1, int(period))).std()
+    return (ma + (nbdev * std)).values, ma.values, (ma - (nbdev * std)).values
+def compute_macd(series, fast, slow, signal):
+    macd_line = series.ewm(span=max(1, int(fast)), adjust=False).mean() - series.ewm(span=max(1, int(slow)), adjust=False).mean()
+    return (macd_line - macd_line.ewm(span=max(1, int(signal)), adjust=False).mean()).values
+def compute_kdj(df, period=9, m1=3, m2=3):
+    low_min = df['low'].rolling(window=max(1, int(period))).min()
+    high_max = df['high'].rolling(window=max(1, int(period))).max()
+    rsv = (df['close'] - low_min) / (high_max - low_min + 1e-10) * 100
+    k = rsv.ewm(com=max(0.1, m1-1), adjust=False).mean()
+    d = k.ewm(com=max(0.1, m2-1), adjust=False).mean()
+    return k.values, d.values, (3 * k - 2 * d).values
+
 def calculate_ai_score(res):
     win_rate = res.GetWinRate()
     net_profit = res.TotalProfit
     mdd = res.MDD
-
     score = 50
     if net_profit > 500000: score += 20
     elif net_profit > 100000: score += 10
     elif net_profit < 0: score -= 20
-
     if win_rate > 0.55: score += 15
     elif win_rate > 0.45: score += 5
     else: score -= 10
-
     if mdd > 0:
         pr_ratio = net_profit / mdd
         if pr_ratio > 2.5: score += 15
         elif pr_ratio > 1.0: score += 5
         else: score -= 10
-    
     return max(min(score, 100), 10)
 
-# ==================== 3. 雲端自動碎片拼接與資料庫讀取 ====================
+# ==================== 2. 核心回測引擎 (移到滑桿與按鈕之前) ====================
+def run_backtest(df, strategy, param1, param2, param3, sl_points):
+    total_bars = len(df)
+    rec = AssignmentRecord(total_bars)
+    if total_bars < 2: return rec
+    close = df['close'].values
+    open_p = df['open'].values
+    stop_loss_line = 0
+    
+    if "(一)" in strategy:
+        ma_long = compute_sma(df['close'], param1)
+        ma_short = compute_sma(df['close'], param2)
+        for n in range(1, total_bars - 1):
+            if np.isnan(ma_long[n-1]) or np.isnan(ma_short[n-1]): continue
+            if rec.OpenInterestQty == 0:
+                if ma_short[n-1] <= ma_long[n-1] and ma_short[n] > ma_long[n]:
+                    rec.Order('Buy', open_p[n+1])
+                    stop_loss_line = open_p[n+1] - sl_points
+                elif ma_short[n-1] >= ma_long[n-1] and ma_short[n] < ma_long[n]:
+                    rec.Order('Sell', open_p[n+1])
+                    stop_loss_line = open_p[n+1] + sl_points
+            elif rec.OpenInterestQty > 0:
+                if (ma_short[n-1] >= ma_long[n-1] and ma_short[n] < ma_long[n]) or close[n] < stop_loss_line: rec.Cover('Sell', open_p[n+1], n)
+                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
+            elif rec.OpenInterestQty < 0:
+                if (ma_short[n-1] <= ma_long[n-1] and ma_short[n] > ma_long[n]) or close[n] > stop_loss_line: rec.Cover('Buy', open_p[n+1], n)
+                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
+
+    elif "(二)" in strategy:
+        rsi = compute_rsi(df['close'], param1)
+        for n in range(1, total_bars - 1):
+            if np.isnan(rsi[n-1]): continue
+            if rec.OpenInterestQty == 0:
+                if rsi[n-1] <= param2 and rsi[n] > param2:
+                    rec.Order('Buy', open_p[n+1])
+                    stop_loss_line = open_p[n+1] - sl_points
+            elif rec.OpenInterestQty > 0:
+                if (rsi[n-1] >= param2 and rsi[n] < param2) or close[n] < stop_loss_line: rec.Cover('Sell', open_p[n+1], n)
+                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
+
+    elif "(三)" in strategy:
+        rsi = compute_rsi(df['close'], param1)
+        for n in range(1, total_bars - 1):
+            if np.isnan(rsi[n-1]): continue
+            if rec.OpenInterestQty == 0:
+                if rsi[n-1] <= param2 and rsi[n] > param2:
+                    rec.Order('Buy', open_p[n+1])
+                    stop_loss_line = open_p[n+1] - sl_points
+                elif rsi[n-1] >= param3 and rsi[n] < param3:
+                    rec.Order('Sell', open_p[n+1])
+                    stop_loss_line = open_p[n+1] + sl_points
+            elif rec.OpenInterestQty > 0:
+                if rsi[n] > param3 or close[n] < stop_loss_line: rec.Cover('Sell', open_p[n+1], n)
+                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
+            elif rec.OpenInterestQty < 0:
+                if rsi[n] < param2 or close[n] > stop_loss_line: rec.Cover('Buy', open_p[n+1], n)
+                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
+
+    elif "(四)" in strategy:
+        upper, middle, lower = compute_bbands(df['close'], param1, param2)
+        for n in range(1, total_bars - 1):
+            if np.isnan(upper[n-1]): continue
+            if rec.OpenInterestQty == 0:
+                if close[n-1] <= lower[n-1] and close[n] > lower[n]:
+                    rec.Order('Buy', open_p[n+1])
+                    stop_loss_line = open_p[n+1] - sl_points
+                elif close[n-1] >= upper[n-1] and close[n] < upper[n]:
+                    rec.Order('Sell', open_p[n+1])
+                    stop_loss_line = open_p[n+1] + sl_points
+            elif rec.OpenInterestQty > 0:
+                if close[n] > upper[n] or close[n] < stop_loss_line: rec.Cover('Sell', open_p[n+1], n)
+                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
+            elif rec.OpenInterestQty < 0:
+                if close[n] < lower[n] or close[n] > stop_loss_line: rec.Cover('Buy', open_p[n+1], n)
+                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
+
+    elif "(五)" in strategy:
+        macdhist = compute_macd(df['close'], param1, param2, param3)
+        for n in range(1, total_bars - 1):
+            if np.isnan(macdhist[n-1]): continue
+            hist_prev, hist_curr = macdhist[n-1], macdhist[n]
+            if rec.OpenInterestQty == 0:
+                if hist_prev <= 0 and hist_curr > 0:
+                    rec.Order('Buy', open_p[n+1])
+                    stop_loss_line = open_p[n+1] - sl_points
+                elif hist_prev >= 0 and hist_curr < 0:
+                    rec.Order('Sell', open_p[n+1])
+                    stop_loss_line = open_p[n+1] + sl_points
+            elif rec.OpenInterestQty > 0:
+                if (hist_prev >= 0 and hist_curr < 0) or close[n] < stop_loss_line: rec.Cover('Sell', open_p[n+1], n)
+                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
+            elif rec.OpenInterestQty < 0:
+                if (hist_prev <= 0 and hist_curr > 0) or close[n] > stop_loss_line: rec.Cover('Buy', open_p[n+1], n)
+                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
+
+    elif "(六)" in strategy:
+        slowk, slowd, j_val = compute_kdj(df, param1, param2, param3)
+        for n in range(1, total_bars - 1):
+            if np.isnan(slowk[n-1]): continue
+            k_prev, k_curr, d_prev, d_curr = slowk[n-1], slowk[n], slowd[n-1], slowd[n]
+            if rec.OpenInterestQty == 0:
+                if k_prev <= d_prev and k_curr > d_curr and k_curr < 30:
+                    rec.Order('Buy', open_p[n+1])
+                    stop_loss_line = open_p[n+1] - sl_points
+                elif k_prev >= d_prev and k_curr < d_curr and k_curr > 70:
+                    rec.Order('Sell', open_p[n+1])
+                    stop_loss_line = open_p[n+1] + sl_points
+            elif rec.OpenInterestQty > 0:
+                if (k_prev >= d_prev and k_curr < d_curr) or j_val[n] > 100 or close[n] < stop_loss_line: rec.Cover('Sell', open_p[n+1], n)
+                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
+            elif rec.OpenInterestQty < 0:
+                if (k_prev <= d_prev and k_curr > d_curr) or j_val[n] < 0 or close[n] > stop_loss_line: rec.Cover('Buy', open_p[n+1], n)
+                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
+                    
+    rec.FillRemainingEquity()
+    return rec
+
+# ==================== 3. 載入資料庫 ====================
 @st.cache_data
 def load_and_process_data():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     target_db = os.path.join(current_dir, "shioaji.db")
-    
     parts = sorted(glob.glob(os.path.join(current_dir, "db_part_*")))
     
     if parts and (not os.path.exists(target_db) or os.path.getsize(target_db) < 100 * 1024 * 1024):
         try:
             with open(target_db, "wb") as main_file:
                 for part in parts:
-                    with open(part, "rb") as f:
-                        main_file.write(f.read())
+                    with open(part, "rb") as f: main_file.write(f.read())
             status = f"雲端 300MB 真實大檔案 (成功拼裝 {len(parts)} 個碎片)"
-        except Exception as e:
-            status = f"碎片拼裝出錯: {str(e)}"
-    elif os.path.exists(target_db):
-        status = "雲端 300MB 真實大檔案 (使用已存在的完全體)"
-    else:
-        status = "系統模擬展示數據"
+        except Exception as e: status = f"碎片拼裝出錯: {str(e)}"
+    elif os.path.exists(target_db): status = "雲端 300MB 真實大檔案 (使用已存在的完全體)"
+    else: status = "系統模擬展示數據"
 
-    if os.path.exists(target_db):
-        db_path = target_db
-    else:
+    if not os.path.exists(target_db):
         dates = pd.date_range(start="2021-01-01", end="2026-01-01", freq="h")
         np.random.seed(42)
         trend = np.linspace(300, 900, len(dates)) 
-        noise = np.cumsum(np.random.randn(len(dates)) * 4)
-        prices = trend + noise
+        prices = trend + np.cumsum(np.random.randn(len(dates)) * 4)
         df_mock = pd.DataFrame({'open': prices, 'high': prices+3, 'low': prices-3, 'close': prices, 'volume': 2500}, index=dates)
         df_mock.index.name = 'time'
         return df_mock.reset_index(), "防卡死安全模擬數據庫"
         
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = [row[0] for row in cursor.fetchall()]
-        target_table = "stock_KBar_2330" if "stock_KBar_2330" in tables else tables[0]
-        
-        df = pd.read_sql_query(f"SELECT * FROM {target_table}", conn)
+        conn = sqlite3.connect(target_db)
+        tables = [row[0] for row in conn.cursor().execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()]
+        df = pd.read_sql_query(f"SELECT * FROM {'stock_KBar_2330' if 'stock_KBar_2330' in tables else tables[0]}", conn)
         conn.close()
-        
-        if 'Time' in df.columns:
-            df.rename(columns={'Time': 'time'}, inplace=True)
+        if 'Time' in df.columns: df.rename(columns={'Time': 'time'}, inplace=True)
         df['time'] = pd.to_datetime(df['time'])
         df.set_index('time', inplace=True)
-        
-        df_hourly = df.resample('60min').agg({
-            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-        }).dropna().reset_index()
-        
-        return df_hourly, status
+        return df.resample('60min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna().reset_index(), status
     except:
         dates = pd.date_range(start="2021-01-01", end="2026-01-01", freq="h")
         np.random.seed(99)
@@ -153,46 +259,10 @@ def load_and_process_data():
         df_mock.index.name = 'time'
         return df_mock.reset_index(), "資料庫讀取異常 ➔ 啟動應急安全數據庫"
 
-# ==================== 用 Pandas 純手寫還原技術指標 ====================
-def compute_sma(series, period):
-    return series.rolling(window=max(1, int(period))).mean().values
-
-def compute_rsi(series, period):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=max(1, int(period))).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=max(1, int(period))).mean()
-    rs = gain / (loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def compute_bbands(series, period, nbdev):
-    ma = series.rolling(window=max(1, int(period))).mean()
-    std = series.rolling(window=max(1, int(period))).std()
-    upper = ma + (nbdev * std)
-    lower = ma - (nbdev * std)
-    return upper.values, ma.values, lower.values
-
-def compute_macd(series, fast, slow, signal):
-    exp1 = series.ewm(span=max(1, int(fast)), adjust=False).mean()
-    exp2 = series.ewm(span=max(1, int(slow)), adjust=False).mean()
-    macd_line = exp1 - exp2
-    signal_line = macd_line.ewm(span=max(1, int(signal)), adjust=False).mean()
-    hist = macd_line - signal_line
-    return hist.values
-
-def compute_kdj(df, period=9, m1=3, m2=3):
-    low_min = df['low'].rolling(window=max(1, int(period))).min()
-    high_max = df['high'].rolling(window=max(1, int(period))).max()
-    rsv = (df['close'] - low_min) / (high_max - low_min + 1e-10) * 100
-    k = rsv.ewm(com=max(0.1, m1-1), adjust=False).mean()
-    d = k.ewm(com=max(0.1, m2-1), adjust=False).mean()
-    j = 3 * k - 2 * d
-    return k.values, d.values, j.values
-
 df_hourly, db_status = load_and_process_data()
 st.caption(f"💡 當前資料來源：{db_status} (總歷史數據: {len(df_hourly):,} 根 K 線)")
 
-# ==================== 4. 側邊欄與滑桿專屬記憶體 (徹底解決死鎖) ====================
+# ==================== 4. 側邊欄選項與預設記憶體 ====================
 st.sidebar.header("⚙️ 策略與參數控制面板")
 strategy_choice = st.sidebar.selectbox(
     "選擇交易策略",
@@ -211,6 +281,79 @@ for k, v in default_keys.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
+# ==================== 5. 🚀 按鈕邏輯 (必須放在滑桿前面，打破死鎖天條！) ====================
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 機器極速參數最佳化")
+
+if st.sidebar.button("🚀 啟動黃金參數最佳化"):
+    with st.spinner("🤖 正在狩獵高勝率、高利潤的神級黃金參數..."):
+        best_score, best_profit = -1, -999999999
+        
+        if "(一)" in strategy_choice:
+            for test_p1 in range(20, 61, 2):
+                for test_p2 in range(5, 20, 2):
+                    for test_sl in range(5, 46, 5):
+                        res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 0, test_sl)
+                        cur_score = calculate_ai_score(res)
+                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                            best_score, best_profit = cur_score, res.TotalProfit
+                            st.session_state["ma_p1"], st.session_state["ma_p2"], st.session_state["ma_sl"] = test_p1, test_p2, test_sl
+                            
+        elif "(二)" in strategy_choice:
+            for test_p1 in range(5, 31, 2):
+                for test_p2 in range(50, 81, 2):
+                    for test_sl in range(5, 46, 5):
+                        res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 0, test_sl)
+                        cur_score = calculate_ai_score(res)
+                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                            best_score, best_profit = cur_score, res.TotalProfit
+                            st.session_state["rsi_s_p1"], st.session_state["rsi_s_p2"], st.session_state["rsi_s_sl"] = test_p1, test_p2, test_sl
+
+        elif "(三)" in strategy_choice:
+            for test_p1 in range(5, 26, 2):
+                for test_p2 in range(15, 41, 5):
+                    for test_p3 in range(60, 91, 5):
+                        for test_sl in range(10, 36, 5):
+                            res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, test_p3, test_sl)
+                            cur_score = calculate_ai_score(res)
+                            if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                                best_score, best_profit = cur_score, res.TotalProfit
+                                st.session_state["rsi_r_p1"], st.session_state["rsi_r_p2"], st.session_state["rsi_r_p3"], st.session_state["rsi_r_sl"] = test_p1, test_p2, test_p3, test_sl
+
+        elif "(四)" in strategy_choice:
+            for test_p1 in range(5, 41, 2):
+                for test_p2 in [1, 2, 3]:
+                    for test_sl in range(5, 46, 5):
+                        res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 0, test_sl)
+                        cur_score = calculate_ai_score(res)
+                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                            best_score, best_profit = cur_score, res.TotalProfit
+                            st.session_state["bb_p1"], st.session_state["bb_p2"], st.session_state["bb_sl"] = test_p1, test_p2, test_sl
+
+        elif "(五)" in strategy_choice:
+            for test_p1 in range(6, 19, 2):
+                for test_p2 in range(21, 38, 2):
+                    for test_sl in range(10, 46, 5):
+                        res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 9, test_sl)
+                        cur_score = calculate_ai_score(res)
+                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                            best_score, best_profit = cur_score, res.TotalProfit
+                            st.session_state["macd_p1"], st.session_state["macd_p2"], st.session_state["macd_sl"] = test_p1, test_p2, test_sl
+
+        elif "(六)" in strategy_choice:
+            for test_p1 in range(5, 26, 2):
+                for test_sl in range(10, 46, 5):
+                    res = run_backtest(df_hourly, strategy_choice, test_p1, 3, 3, test_sl)
+                    cur_score = calculate_ai_score(res)
+                    if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
+                        best_score, best_profit = cur_score, res.TotalProfit
+                        st.session_state["kdj_p1"], st.session_state["kdj_sl"] = test_p1, test_sl
+
+        st.sidebar.success(f"✨ 找到最高 AI 評分策略組合 ({best_score} 分)！")
+        st.rerun() # 立即刷新，此時下方滑桿還沒被畫出來，所以沒有報錯問題！
+
+# ==================== 6. 渲染滑桿 (此時它們會乖乖讀取最新的 session_state) ====================
+st.sidebar.markdown("---")
 if strategy_choice == "(一) 移動平均策略 (MA)":
     p1 = st.sidebar.slider("長天期均線 (Long MA)", 20, 60, key="ma_p1")
     p2 = st.sidebar.slider("短天期均線 (Short MA)", 5, 19, key="ma_p2")
@@ -242,233 +385,9 @@ elif strategy_choice == "(六) KDJ 震盪策略":
     p3 = st.sidebar.slider("SlowD 磨平週期", 2, 10, key="kdj_p3")
     stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="kdj_sl")
 
-# ==================== 5. 核心回測實作 ====================
-def run_backtest(df, strategy, param1, param2, param3, sl_points):
-    total_bars = len(df)
-    rec = AssignmentRecord(total_bars)
-    if total_bars < 2: return rec
-    
-    close = df['close'].values
-    open_p = df['open'].values
-    stop_loss_line = 0
-    
-    if "(一)" in strategy:
-        ma_long = compute_sma(df['close'], param1)
-        ma_short = compute_sma(df['close'], param2)
-        for n in range(1, total_bars - 1):
-            if np.isnan(ma_long[n-1]) or np.isnan(ma_short[n-1]): continue
-            if rec.OpenInterestQty == 0:
-                if ma_short[n-1] <= ma_long[n-1] and ma_short[n] > ma_long[n]:
-                    rec.Order('Buy', open_p[n+1])
-                    stop_loss_line = open_p[n+1] - sl_points
-                elif ma_short[n-1] >= ma_long[n-1] and ma_short[n] < ma_long[n]:
-                    rec.Order('Sell', open_p[n+1])
-                    stop_loss_line = open_p[n+1] + sl_points
-            elif rec.OpenInterestQty > 0:
-                if (ma_short[n-1] >= ma_long[n-1] and ma_short[n] < ma_long[n]) or close[n] < stop_loss_line:
-                    rec.Cover('Sell', open_p[n+1], n)
-                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
-            elif rec.OpenInterestQty < 0:
-                if (ma_short[n-1] <= ma_long[n-1] and ma_short[n] > ma_long[n]) or close[n] > stop_loss_line:
-                    rec.Cover('Buy', open_p[n+1], n)
-                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
-
-    elif "(二)" in strategy:
-        rsi = compute_rsi(df['close'], param1)
-        for n in range(1, total_bars - 1):
-            if np.isnan(rsi[n-1]): continue
-            if rec.OpenInterestQty == 0:
-                if rsi[n-1] <= param2 and rsi[n] > param2:
-                    rec.Order('Buy', open_p[n+1])
-                    stop_loss_line = open_p[n+1] - sl_points
-            elif rec.OpenInterestQty > 0:
-                if (rsi[n-1] >= param2 and rsi[n] < param2) or close[n] < stop_loss_line:
-                    rec.Cover('Sell', open_p[n+1], n)
-                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
-
-    elif "(三)" in strategy:
-        rsi = compute_rsi(df['close'], param1)
-        for n in range(1, total_bars - 1):
-            if np.isnan(rsi[n-1]): continue
-            if rec.OpenInterestQty == 0:
-                if rsi[n-1] <= param2 and rsi[n] > param2:
-                    rec.Order('Buy', open_p[n+1])
-                    stop_loss_line = open_p[n+1] - sl_points
-                elif rsi[n-1] >= param3 and rsi[n] < param3:
-                    rec.Order('Sell', open_p[n+1])
-                    stop_loss_line = open_p[n+1] + sl_points
-            elif rec.OpenInterestQty > 0:
-                if rsi[n] > param3 or close[n] < stop_loss_line:
-                    rec.Cover('Sell', open_p[n+1], n)
-                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
-            elif rec.OpenInterestQty < 0:
-                if rsi[n] < param2 or close[n] > stop_loss_line:
-                    rec.Cover('Buy', open_p[n+1], n)
-                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
-
-    elif "(四)" in strategy:
-        upper, middle, lower = compute_bbands(df['close'], param1, param2)
-        for n in range(1, total_bars - 1):
-            if np.isnan(upper[n-1]): continue
-            if rec.OpenInterestQty == 0:
-                if close[n-1] <= lower[n-1] and close[n] > lower[n]:
-                    rec.Order('Buy', open_p[n+1])
-                    stop_loss_line = open_p[n+1] - sl_points
-                elif close[n-1] >= upper[n-1] and close[n] < upper[n]:
-                    rec.Order('Sell', open_p[n+1])
-                    stop_loss_line = open_p[n+1] + sl_points
-            elif rec.OpenInterestQty > 0:
-                if close[n] > upper[n] or close[n] < stop_loss_line:
-                    rec.Cover('Sell', open_p[n+1], n)
-                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
-            elif rec.OpenInterestQty < 0:
-                if close[n] < lower[n] or close[n] > stop_loss_line:
-                    rec.Cover('Buy', open_p[n+1], n)
-                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
-
-    elif "(五)" in strategy:
-        macdhist = compute_macd(df['close'], param1, param2, param3)
-        for n in range(1, total_bars - 1):
-            if np.isnan(macdhist[n-1]): continue
-            hist_prev, hist_curr = macdhist[n-1], macdhist[n]
-            if rec.OpenInterestQty == 0:
-                if hist_prev <= 0 and hist_curr > 0:
-                    rec.Order('Buy', open_p[n+1])
-                    stop_loss_line = open_p[n+1] - sl_points
-                elif hist_prev >= 0 and hist_curr < 0:
-                    rec.Order('Sell', open_p[n+1])
-                    stop_loss_line = open_p[n+1] + sl_points
-            elif rec.OpenInterestQty > 0:
-                if (hist_prev >= 0 and hist_curr < 0) or close[n] < stop_loss_line:
-                    rec.Cover('Sell', open_p[n+1], n)
-                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
-            elif rec.OpenInterestQty < 0:
-                if (hist_prev <= 0 and hist_curr > 0) or close[n] > stop_loss_line:
-                    rec.Cover('Buy', open_p[n+1], n)
-                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
-
-    elif "(六)" in strategy:
-        slowk, slowd, j_val = compute_kdj(df, param1, param2, param3)
-        for n in range(1, total_bars - 1):
-            if np.isnan(slowk[n-1]): continue
-            k_prev, k_curr = slowk[n-1], slowk[n]
-            d_prev, d_curr = slowd[n-1], slowd[n]
-            if rec.OpenInterestQty == 0:
-                if k_prev <= d_prev and k_curr > d_curr and k_curr < 30:
-                    rec.Order('Buy', open_p[n+1])
-                    stop_loss_line = open_p[n+1] - sl_points
-                elif k_prev >= d_prev and k_curr < d_curr and k_curr > 70:
-                    rec.Order('Sell', open_p[n+1])
-                    stop_loss_line = open_p[n+1] + sl_points
-            elif rec.OpenInterestQty > 0:
-                if (k_prev >= d_prev and k_curr < d_curr) or j_val[n] > 100 or close[n] < stop_loss_line:
-                    rec.Cover('Sell', open_p[n+1], n)
-                elif close[n] - sl_points > stop_loss_line: stop_loss_line = close[n] - sl_points
-            elif rec.OpenInterestQty < 0:
-                if (k_prev <= d_prev and k_curr > d_curr) or j_val[n] < 0 or close[n] > stop_loss_line:
-                    rec.Cover('Buy', open_p[n+1], n)
-                elif close[n] + sl_points < stop_loss_line: stop_loss_line = close[n] + sl_points
-                    
-    rec.FillRemainingEquity()
-    return rec
-
-# ==================== 6. 黃金參數最佳化 (鎖定 AI 最高分) ====================
-st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 機器極速參數最佳化")
-
-if st.sidebar.button("🚀 啟動黃金參數最佳化"):
-    with st.spinner("🤖 正在狩獵高勝率、高利潤的神級黃金參數..."):
-        best_score = -1
-        best_profit = -999999999
-        best_p1, best_p2, best_p3, best_sl = p1, p2, p3, stop_loss
-        
-        # 💡 以 AI 評分最高為目標，如果同分才比淨利，杜絕瞎貓碰到死耗子的爛參數！
-        if "(一)" in strategy_choice:
-            for test_p1 in range(20, 61, 2):
-                for test_p2 in range(5, 20, 2):
-                    for test_sl in range(5, 46, 5):
-                        res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 0, test_sl)
-                        cur_score = calculate_ai_score(res)
-                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
-                            best_score, best_profit = cur_score, res.TotalProfit
-                            best_p1, best_p2, best_sl = test_p1, test_p2, test_sl
-            
-            # 強制覆寫滑桿記憶體，解開死鎖！
-            st.session_state["ma_p1"] = best_p1
-            st.session_state["ma_p2"] = best_p2
-            st.session_state["ma_sl"] = best_sl
-            
-        elif "(二)" in strategy_choice:
-            for test_p1 in range(5, 31, 2):
-                for test_p2 in range(50, 81, 2):
-                    for test_sl in range(5, 46, 5):
-                        res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 0, test_sl)
-                        cur_score = calculate_ai_score(res)
-                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
-                            best_score, best_profit = cur_score, res.TotalProfit
-                            best_p1, best_p2, best_sl = test_p1, test_p2, test_sl
-            st.session_state["rsi_s_p1"] = best_p1
-            st.session_state["rsi_s_p2"] = best_p2
-            st.session_state["rsi_s_sl"] = best_sl
-
-        elif "(三)" in strategy_choice:
-            for test_p1 in range(5, 26, 2):
-                for test_p2 in range(15, 41, 5):
-                    for test_p3 in range(60, 91, 5):
-                        for test_sl in range(10, 36, 5):
-                            res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, test_p3, test_sl)
-                            cur_score = calculate_ai_score(res)
-                            if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
-                                best_score, best_profit = cur_score, res.TotalProfit
-                                best_p1, best_p2, best_p3, best_sl = test_p1, test_p2, test_p3, test_sl
-            st.session_state["rsi_r_p1"] = best_p1
-            st.session_state["rsi_r_p2"] = best_p2
-            st.session_state["rsi_r_p3"] = best_p3
-            st.session_state["rsi_r_sl"] = best_sl
-
-        elif "(四)" in strategy_choice:
-            for test_p1 in range(5, 41, 2):
-                for test_p2 in [1, 2, 3]:
-                    for test_sl in range(5, 46, 5):
-                        res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 0, test_sl)
-                        cur_score = calculate_ai_score(res)
-                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
-                            best_score, best_profit = cur_score, res.TotalProfit
-                            best_p1, best_p2, best_sl = test_p1, test_p2, test_sl
-            st.session_state["bb_p1"] = best_p1
-            st.session_state["bb_p2"] = best_p2
-            st.session_state["bb_sl"] = best_sl
-
-        elif "(五)" in strategy_choice:
-            for test_p1 in range(6, 19, 2):
-                for test_p2 in range(21, 38, 2):
-                    for test_sl in range(10, 46, 5):
-                        res = run_backtest(df_hourly, strategy_choice, test_p1, test_p2, 9, test_sl)
-                        cur_score = calculate_ai_score(res)
-                        if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
-                            best_score, best_profit = cur_score, res.TotalProfit
-                            best_p1, best_p2, best_sl = test_p1, test_p2, test_sl
-            st.session_state["macd_p1"] = best_p1
-            st.session_state["macd_p2"] = best_p2
-            st.session_state["macd_sl"] = best_sl
-
-        elif "(六)" in strategy_choice:
-            for test_p1 in range(5, 26, 2):
-                for test_sl in range(10, 46, 5):
-                    res = run_backtest(df_hourly, strategy_choice, test_p1, 3, 3, test_sl)
-                    cur_score = calculate_ai_score(res)
-                    if cur_score > best_score or (cur_score == best_score and res.TotalProfit > best_profit):
-                        best_score, best_profit = cur_score, res.TotalProfit
-                        best_p1, best_sl = test_p1, test_sl
-            st.session_state["kdj_p1"] = best_p1
-            st.session_state["kdj_sl"] = best_sl
-
-        st.sidebar.success(f"✨ 找到最高 AI 評分策略組合 ({best_score} 分)！")
-        st.rerun()
-
+# ==================== 7. 主畫面回測執行與儀表板 ====================
 current_res = run_backtest(df_hourly, strategy_choice, p1, p2, p3, stop_loss)
 
-# ==================== 7. 數據呈現儀表板 ====================
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("💰 總淨利 (TWD)", f"${current_res.TotalProfit:,.0f}")
 col2.metric("📈 交易勝率", f"{current_res.GetWinRate()*100:.2f}%")
