@@ -109,7 +109,6 @@ def load_and_process_data():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     target_db = os.path.join(current_dir, "shioaji.db")
     
-    # 💡 黑科技：如果雲端找不到 shioaji.db，但有看到 db_part_ 碎片，就地進行無縫拼接
     parts = sorted(glob.glob(os.path.join(current_dir, "db_part_*")))
     if not os.path.exists(target_db) and parts:
         with open(target_db, "wb") as main_file:
@@ -117,7 +116,6 @@ def load_and_process_data():
                 with open(part, "rb") as f:
                     main_file.write(f.read())
                     
-    # 優先確認拼接後的本地資料庫是否存在
     if os.path.exists(target_db):
         db_path = target_db
         status = "雲端 300MB 真實大檔案 (碎片自動還原)"
@@ -147,7 +145,6 @@ def load_and_process_data():
     df['time'] = pd.to_datetime(df['time'])
     df.set_index('time', inplace=True)
     
-    # 💡 讀入 300MB 大檔後，自動轉為 1 小時 K 線以確保策略運算速度如跑車般流暢
     df_hourly = df.resample('60min').agg({
         'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
     }).dropna().reset_index()
@@ -164,52 +161,61 @@ strategy_choice = st.sidebar.selectbox(
     ["(一) 移動平均策略 (MA)", "(二) RSI 順勢策略", "(三) RSI 逆勢策略", "(四) 布林通道策略 (BBands)", "(五) MACD 趨勢策略", "(六) KDJ 震盪策略"]
 )
 
-if "last_strategy" not in st.session_state:
-    st.session_state.last_strategy = strategy_choice
+# 💡 初始化各策略的預設初始參數字典（確保不受殘留干擾）
+default_presets = {
+    "(一) 移動平均策略 (MA)": {"p1": 20, "p2": 5, "p3": 0, "sl": 10},
+    "(二) RSI 順勢策略": {"p1": 14, "p2": 50, "p3": 0, "sl": 20},
+    "(三) RSI 逆勢策略": {"p1": 14, "p2": 30, "p3": 70, "sl": 15},
+    "(四) 布林通道策略 (BBands)": {"p1": 20, "p2": 2, "p3": 0, "sl": 25},
+    "(五) MACD 趨勢策略": {"p1": 12, "p2": 26, "p3": 9, "sl": 30},
+    "(六) KDJ 震盪策略": {"p1": 9, "p2": 3, "p3": 3, "sl": 25}
+}
 
 if "strat_params" not in st.session_state:
-    st.session_state.strat_params = {
-        "(一) 移動平均策略 (MA)": {"p1": 20, "p2": 5, "p3": 0, "sl": 10},
-        "(二) RSI 順勢策略": {"p1": 14, "p2": 50, "p3": 0, "sl": 20},
-        "(三) RSI 逆勢策略": {"p1": 14, "p2": 30, "p3": 70, "sl": 15},
-        "(四) 布林通道策略 (BBands)": {"p1": 20, "p2": 2, "p3": 0, "sl": 25},
-        "(五) MACD 趨勢策略": {"p1": 12, "p2": 26, "p3": 9, "sl": 30},
-        "(六) KDJ 震盪策略": {"p1": 9, "p2": 3, "p3": 3, "sl": 25}
-    }
+    st.session_state.strat_params = dict(default_presets)
+
+# 當使用者「手動切換不同策略」時，自動洗掉上一檔策略殘留的暫存狀態
+if "last_strategy" not in st.session_state:
+    st.session_state.last_strategy = strategy_choice
+elif st.session_state.last_strategy != strategy_choice:
+    st.session_state.strat_params[strategy_choice] = dict(default_presets[strategy_choice])
+    st.session_state.last_strategy = strategy_choice
 
 current_params = st.session_state.strat_params[strategy_choice]
 
+# 渲染滑桿組件
 if strategy_choice == "(一) 移動平均策略 (MA)":
-    p1 = st.sidebar.slider("長天期均線 (Long MA)", 20, 60, int(current_params["p1"]))
-    p2 = st.sidebar.slider("短天期均線 (Short MA)", 5, 19, int(current_params["p2"]))
+    p1 = st.sidebar.slider("長天期均線 (Long MA)", 20, 60, int(current_params["p1"]), key="ma_p1")
+    p2 = st.sidebar.slider("短天期均線 (Short MA)", 5, 19, int(current_params["p2"]), key="ma_p2")
     p3 = 0
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]))
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="ma_sl")
 elif strategy_choice == "(二) RSI 順勢策略":
-    p1 = st.sidebar.slider("RSI 週期", 5, 30, int(current_params["p1"]))
-    p2 = st.sidebar.slider("順勢買入超買界線", 50, 80, int(current_params["p2"]))
+    p1 = st.sidebar.slider("RSI 週期", 5, 30, int(current_params["p1"]), key="rsi_s_p1")
+    p2 = st.sidebar.slider("順勢買入超買界線", 50, 80, int(current_params["p2"]), key="rsi_s_p2")
     p3 = 0
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]))
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="rsi_s_sl")
 elif strategy_choice == "(三) RSI 逆勢策略":
-    p1 = st.sidebar.slider("RSI 週期", 5, 30, int(current_params["p1"]))
-    p2 = st.sidebar.slider("逆勢買入低估界線", 10, 45, int(current_params["p2"]))
-    p3 = st.sidebar.slider("逆勢賣出高估界線", 55, 90, int(current_params["p3"]))
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]))
+    p1 = st.sidebar.slider("RSI 週期", 5, 30, int(current_params["p1"]), key="rsi_r_p1")
+    p2 = st.sidebar.slider("逆勢買入低估界線", 10, 45, int(current_params["p2"]), key="rsi_r_p2")
+    p3 = st.sidebar.slider("逆勢賣出高估界線", 55, 90, int(current_params["p3"]), key="rsi_r_p3")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="rsi_r_sl")
 elif strategy_choice == "(四) 布林通道策略 (BBands)":
-    p1 = st.sidebar.slider("中線週期 (MA period)", 5, 40, int(current_params["p1"]))
-    p2 = st.sidebar.slider("標準差倍數 (Std Dev)", 1, 3, int(current_params["p2"]))
+    p1 = st.sidebar.slider("中線週期 (MA period)", 5, 40, int(current_params["p1"]), key="bb_p1")
+    p2 = st.sidebar.slider("標準差倍數 (Std Dev)", 1, 3, int(current_params["p2"]), key="bb_p2")
     p3 = 0
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]))
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="bb_sl")
 elif strategy_choice == "(五) MACD 趨勢策略":
-    p1 = st.sidebar.slider("MACD 快線週期", 5, 20, int(current_params["p1"]))
-    p2 = st.sidebar.slider("MACD 慢線週期", 21, 40, int(current_params["p2"]))
-    p3 = st.sidebar.slider("訊號線週期", 5, 15, int(current_params["p3"]))
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]))
+    p1 = st.sidebar.slider("MACD 快線週期", 5, 20, int(current_params["p1"]), key="macd_p1")
+    p2 = st.sidebar.slider("MACD 慢線週期", 21, 40, int(current_params["p2"]), key="macd_p2")
+    p3 = st.sidebar.slider("訊號線週期", 5, 15, int(current_params["p3"]), key="macd_p3")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="macd_sl")
 elif strategy_choice == "(六) KDJ 震盪策略":
-    p1 = st.sidebar.slider("KDJ 快線週期 (FastK)", 5, 25, int(current_params["p1"]))
-    p2 = st.sidebar.slider("SlowK 磨平週期", 2, 10, int(current_params["p2"]))
-    p3 = st.sidebar.slider("SlowD 磨平週期", 2, 10, int(current_params["p3"]))
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]))
+    p1 = st.sidebar.slider("KDJ 快線週期 (FastK)", 5, 25, int(current_params["p1"]), key="kdj_p1")
+    p2 = st.sidebar.slider("SlowK 磨平週期", 2, 10, int(current_params["p2"]), key="kdj_p2")
+    p3 = st.sidebar.slider("SlowD 磨平週期", 2, 10, int(current_params["p3"]), key="kdj_p3")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]), key="kdj_sl")
 
+# 當前使用者拉動滑桿時，即時寫入暫存字典中
 st.session_state.strat_params[strategy_choice]["p1"] = p1
 st.session_state.strat_params[strategy_choice]["p2"] = p2
 st.session_state.strat_params[strategy_choice]["p3"] = p3
@@ -352,6 +358,9 @@ st.sidebar.caption("同時計算『風險與報酬』，尋找最高風險報酬
 
 if st.sidebar.button("🚀 啟動黃金參數最佳化"):
     with st.spinner("🤖 AI 正在高速回溯參數組合，尋找最佳風報比..."):
+        # 💡 解法核心一：強制清空快取，確保最佳化迴圈拿到的是原汁原味的資料
+        st.cache_data.clear()
+        
         best_ratio = -999
         best_p1, best_p2, best_p3, best_sl = p1, p2, p3, stop_loss
         
@@ -414,28 +423,28 @@ if st.sidebar.button("🚀 啟動黃金參數最佳化"):
                         best_ratio, best_p1, best_sl = ratio, test_p1, test_sl
             best_p2, best_p3 = 3, 3
 
-        st.session_state.strat_params[strategy_choice]["p1"] = best_p1
-        st.session_state.strat_params[strategy_choice]["p2"] = best_p2
-        st.session_state.strat_params[strategy_choice]["p3"] = best_p3
-        st.session_state.strat_params[strategy_choice]["sl"] = best_sl
+        # 💡 解法核心二：將最優解覆蓋進暫存字典，強制洗掉使用者剛剛亂拉的橫桿狀態
+        st.session_state.strat_params[strategy_choice] = {
+            "p1": best_p1, "p2": best_p2, "p3": best_p3, "sl": best_sl
+        }
 
         st.sidebar.success(f"✨ 最佳化完成！最高風報比：{best_ratio:.2f}")
         st.rerun()
 
 # 最終計算當前滑桿參數的回測結果
-current_res = run_backtest(df_hourly, strategy_choice, p1, p2, p3, stop_loss)
+激活動態結果 = run_backtest(df_hourly, strategy_choice, p1, p2, p3, stop_loss)
 
 # ==================== 7. 數據呈現儀表板 ====================
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("💰 總淨利 (TWD)", f"${current_res.TotalProfit:,.0f}")
-col2.metric("📈 交易勝率", f"{current_res.GetWinRate()*100:.2f}%")
-col3.metric("📉 最大回撤 (MDD)", f"${current_res.MDD:,.0f}")
-risk_reward = current_res.TotalProfit / current_res.MDD if current_res.MDD > 0 else 0
+col1.metric("💰 總淨利 (TWD)", f"${激活動態結果.TotalProfit:,.0f}")
+col2.metric("📈 交易勝率", f"{激活動態結果.GetWinRate()*100:.2f}%")
+col3.metric("📉 最大回撤 (MDD)", f"${激活動態結果.MDD:,.0f}")
+risk_reward = 激活動態結果.TotalProfit / 激活動態結果.MDD if 激活動態結果.MDD > 0 else 0
 col4.metric("⚖️ 風險報酬比 (風報比)", f"{risk_reward:.2f}")
 
 # 繪製主圖表
 fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(df_hourly['time'], current_res.EquityHistory, label="Cumulative PnL", color="indigo", linewidth=2)
+ax.plot(df_hourly['time'], 激活動態結果.EquityHistory, label="Cumulative PnL", color="indigo", linewidth=2)
 ax.set_title(f"Strategy Backtest - Equity Curve", fontsize=12)
 ax.set_xlabel("Timeline")
 ax.set_ylabel("Profit / Loss (TWD)")
@@ -448,9 +457,9 @@ st.pyplot(fig)
 st.markdown("---")
 st.subheader("🤖 AI 量化交易策略體質綜合評估與比較")
 
-win_rate = current_res.GetWinRate()
-net_profit = current_res.TotalProfit
-mdd = current_res.MDD
+win_rate = 激活動態結果.GetWinRate()
+net_profit = 激活動態結果.TotalProfit
+mdd = 激動態結果.MDD
 
 score = 50
 if net_profit > 500000: score += 20
