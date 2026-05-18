@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import glob
 
 # 移除微軟正黑體，改用全平台通用的英文字體，避免 Linux 雲端亂碼
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'sans-serif']
@@ -102,20 +103,29 @@ def compute_kdj(df, period=9, m1=3, m2=3):
     j = 3 * k - 2 * d
     return k.values, d.values, j.values
 
-# ==================== 3. 資料庫讀取 ====================
+# ==================== 3. 雲端自動碎片拼接與資料庫讀取 ====================
 @st.cache_data
 def load_and_process_data():
-    db_path = "shioaji.db"
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    cloud_db_path = os.path.join(current_dir, "shioaji.db")
+    target_db = os.path.join(current_dir, "shioaji.db")
     
-    if os.path.exists(cloud_db_path):
-        db_path = cloud_db_path
-    elif not os.path.exists(db_path):
+    # 💡 黑科技：如果雲端找不到 shioaji.db，但有看到 db_part_ 碎片，就地進行無縫拼接
+    parts = sorted(glob.glob(os.path.join(current_dir, "db_part_*")))
+    if not os.path.exists(target_db) and parts:
+        with open(target_db, "wb") as main_file:
+            for part in parts:
+                with open(part, "rb") as f:
+                    main_file.write(f.read())
+                    
+    # 優先確認拼接後的本地資料庫是否存在
+    if os.path.exists(target_db):
+        db_path = target_db
+        status = "雲端 300MB 真實大檔案 (碎片自動還原)"
+    elif os.path.exists(r"C:\Users\Minir\OneDrive\桌面\量化交易期末報告\shioaji.db"):
         db_path = r"C:\Users\Minir\OneDrive\桌面\量化交易期末報告\shioaji.db"
-        
-    if not os.path.exists(db_path):
-        st.warning("⚠️ 找不到 shioaji.db 資料庫，切換至系統模擬展示數據")
+        status = "本地 300MB 真實台積電完整歷史資料庫"
+    else:
+        st.warning("⚠️ 找不到任何資料庫或碎片，切換至系統模擬展示數據")
         dates = pd.date_range(start="2020-01-01", end="2025-01-01", freq="h")
         np.random.seed(42)
         prices = 300 + np.cumsum(np.random.randn(len(dates)) * 2)
@@ -137,11 +147,12 @@ def load_and_process_data():
     df['time'] = pd.to_datetime(df['time'])
     df.set_index('time', inplace=True)
     
+    # 💡 讀入 300MB 大檔後，自動轉為 1 小時 K 線以確保策略運算速度如跑車般流暢
     df_hourly = df.resample('60min').agg({
         'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
     }).dropna().reset_index()
     
-    return df_hourly, "真實台積電歷史資料庫"
+    return df_hourly, status
 
 df_hourly, db_status = load_and_process_data()
 st.caption(f"💡 當前資料來源：{db_status} (總歷史數據: {len(df_hourly):,} 根 K 線)")
@@ -153,11 +164,9 @@ strategy_choice = st.sidebar.selectbox(
     ["(一) 移動平均策略 (MA)", "(二) RSI 順勢策略", "(三) RSI 逆勢策略", "(四) 布林通道策略 (BBands)", "(五) MACD 趨勢策略", "(六) KDJ 震盪策略"]
 )
 
-# 💡 初始化與切換策略的記憶機制（防止跨策略干擾爆錯）
 if "last_strategy" not in st.session_state:
     st.session_state.last_strategy = strategy_choice
 
-# 定義一個安全的記憶體字典，用來存放各策略的目前最優/手動滑桿值
 if "strat_params" not in st.session_state:
     st.session_state.strat_params = {
         "(一) 移動平均策略 (MA)": {"p1": 20, "p2": 5, "p3": 0, "sl": 10},
@@ -168,10 +177,8 @@ if "strat_params" not in st.session_state:
         "(六) KDJ 震盪策略": {"p1": 9, "p2": 3, "p3": 3, "sl": 25}
     }
 
-# 取得目前所選策略的參數包
 current_params = st.session_state.strat_params[strategy_choice]
 
-# 渲染滑桿組件
 if strategy_choice == "(一) 移動平均策略 (MA)":
     p1 = st.sidebar.slider("長天期均線 (Long MA)", 20, 60, int(current_params["p1"]))
     p2 = st.sidebar.slider("短天期均線 (Short MA)", 5, 19, int(current_params["p2"]))
@@ -203,7 +210,6 @@ elif strategy_choice == "(六) KDJ 震盪策略":
     p3 = st.sidebar.slider("SlowD 磨平週期", 2, 10, int(current_params["p3"]))
     stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, int(current_params["sl"]))
 
-# 使用者拖曳滑桿時，即時更新至記憶體，確保滑桿狀態與回測同步
 st.session_state.strat_params[strategy_choice]["p1"] = p1
 st.session_state.strat_params[strategy_choice]["p2"] = p2
 st.session_state.strat_params[strategy_choice]["p3"] = p3
@@ -408,7 +414,6 @@ if st.sidebar.button("🚀 啟動黃金參數最佳化"):
                         best_ratio, best_p1, best_sl = ratio, test_p1, test_sl
             best_p2, best_p3 = 3, 3
 
-        # 💡 【終極解法】：只把最優數值更新到安全的字典記憶體中，絕不硬改正在渲染的 widget key
         st.session_state.strat_params[strategy_choice]["p1"] = best_p1
         st.session_state.strat_params[strategy_choice]["p2"] = best_p2
         st.session_state.strat_params[strategy_choice]["p3"] = best_p3
@@ -470,7 +475,7 @@ if score >= 80:
 elif score >= 60:
     rating = "⚖️ 良好 (Tier B)"
     color = "blue"
-    advice = "策略具備基本的獲利能力，且勝率維持在合理範圍。然而最大回撤（MDD）偏高，說明在行情反轉時移動止損的回控速度不夠敏盛。建議進一步優化止損點數，或加入濾網以汰除震盪盤整行情。"
+    advice = "策略具備基本的獲利能力，且勝率維持在合理範圍。然而最大回撤（MDD）偏高，說明在行情反轉時移動止損的回控速度不夠敏銳。建議進一步優化止損點數，或加入濾網以汰除震盪盤整行情。"
 else:
     rating = "⚠️ 待優化 (Tier C)"
     color = "red"
