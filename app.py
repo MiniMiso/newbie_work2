@@ -459,7 +459,7 @@ st.subheader("🤖 AI 量化交易策略體質綜合評估與比較")
 
 win_rate = 激活動態結果.GetWinRate()
 net_profit = 激活動態結果.TotalProfit
-mdd = 激動態結果.MDD
+mdd = 激活動態結果.MDD
 
 score = 50
 if net_profit > 500000: score += 20
