@@ -355,38 +355,45 @@ if st.sidebar.button("🚀 啟動黃金參數最佳化"):
         st.sidebar.success(f"✨ 閃電優化完成！找到最高 AI 評分策略組合 ({best_score} 分)！")
         st.rerun()
 
-# ==================== 6. 渲染滑桿 (此時它們會乖乖讀取最新的 session_state) ====================
+# ==================== 6. 渲染滑桿 (擴大 Max 值，完美包容黃金參數) ====================
 st.sidebar.markdown("---")
 if strategy_choice == "(一) 移動平均策略 (MA)":
-    p1 = st.sidebar.slider("長天期均線 (Long MA)", 20, 60, key="ma_p1")
-    p2 = st.sidebar.slider("短天期均線 (Short MA)", 5, 19, key="ma_p2")
+    # 把短天期均線的 Max 從 19 放大到 30，長天期放大到 80，移動止損放大到 60
+    p1 = st.sidebar.slider("長天期均線 (Long MA)", 20, 80, key="ma_p1")
+    p2 = st.sidebar.slider("短天期均線 (Short MA)", 5, 30, key="ma_p2")
     p3 = 0
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="ma_sl")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 60, key="ma_sl")
+    
 elif strategy_choice == "(二) RSI 順勢策略":
-    p1 = st.sidebar.slider("RSI 週期", 5, 30, key="rsi_s_p1")
-    p2 = st.sidebar.slider("順勢買入超買界線", 50, 80, key="rsi_s_p2")
+    # 擴大邊界，確保按鈕搜尋到的數值不會溢出
+    p1 = st.sidebar.slider("RSI 週期", 5, 40, key="rsi_s_p1")
+    p2 = st.sidebar.slider("順勢買入超買界線", 40, 90, key="rsi_s_p2")
     p3 = 0
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="rsi_s_sl")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 60, key="rsi_s_sl")
+    
 elif strategy_choice == "(三) RSI 逆勢策略":
-    p1 = st.sidebar.slider("RSI 週期", 5, 30, key="rsi_r_p1")
-    p2 = st.sidebar.slider("逆勢買入低估界線", 10, 45, key="rsi_r_p2")
-    p3 = st.sidebar.slider("逆勢賣出高估界線", 55, 90, key="rsi_r_p3")
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="rsi_r_sl")
+    p1 = st.sidebar.slider("RSI 週期", 5, 40, key="rsi_r_p1")
+    p2 = st.sidebar.slider("逆勢買入低估界線", 10, 50, key="rsi_r_p2")
+    p3 = st.sidebar.slider("逆勢賣出高估界線", 50, 95, key="rsi_r_p3")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 60, key="rsi_r_sl")
+    
 elif strategy_choice == "(四) 布林通道策略 (BBands)":
-    p1 = st.sidebar.slider("中線週期 (MA period)", 5, 40, key="bb_p1")
-    p2 = st.sidebar.slider("標準差倍數 (Std Dev)", 1, 3, key="bb_p2")
+    p1 = st.sidebar.slider("中線週期 (MA period)", 5, 50, key="bb_p1")
+    p2 = st.sidebar.slider("標準差倍數 (Std Dev)", 1, 4, key="bb_p2")
     p3 = 0
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="bb_sl")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 60, key="bb_sl")
+    
 elif strategy_choice == "(五) MACD 趨勢策略":
-    p1 = st.sidebar.slider("MACD 快線週期", 5, 20, key="macd_p1")
-    p2 = st.sidebar.slider("MACD 慢線週期", 21, 40, key="macd_p2")
-    p3 = st.sidebar.slider("訊號線週期", 5, 15, key="macd_p3")
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="macd_sl")
+    p1 = st.sidebar.slider("MACD 快線週期", 5, 30, key="macd_p1")
+    p2 = st.sidebar.slider("MACD 慢線週期", 20, 50, key="macd_p2")
+    p3 = st.sidebar.slider("訊號線週期", 5, 25, key="macd_p3")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 60, key="macd_sl")
+    
 elif strategy_choice == "(六) KDJ 震盪策略":
-    p1 = st.sidebar.slider("KDJ 快線週期 (FastK)", 5, 25, key="kdj_p1")
-    p2 = st.sidebar.slider("SlowK 磨平週期", 2, 10, key="kdj_p2")
-    p3 = st.sidebar.slider("SlowD 磨平週期", 2, 10, key="kdj_p3")
-    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 50, key="kdj_sl")
+    p1 = st.sidebar.slider("KDJ 快線週期 (FastK)", 5, 35, key="kdj_p1")
+    p2 = st.sidebar.slider("SlowK 磨平週期", 2, 15, key="kdj_p2")
+    p3 = st.sidebar.slider("SlowD 磨平週期", 2, 15, key="kdj_p3")
+    stop_loss = st.sidebar.slider("移動止損點數 (元)", 5, 60, key="kdj_sl")
 
 # ==================== 7. 主畫面回測執行與儀表板 ====================
 current_res = run_backtest(df_hourly, strategy_choice, p1, p2, p3, stop_loss)
